@@ -160,19 +160,22 @@ def clear_old_visits():
     conn.close()
 
 def get_all_today_visits():
-    """Отримання списку всіх відміток за сьогодні для вчителя."""
+    """Отримання списку ОСТАННІХ статусів для кожного учня окремо."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     today = datetime.now().strftime("%Y-%m-%d")
     
-    # Об'єднуємо таблиці, щоб отримати ПІБ користувача разом зі статусом
+    # Цей запит гарантує, що ми беремо ПІБ саме того учня, який робив відмітку
     cursor.execute('''
-        SELECT users.full_name, visits.status, visits.timestamp
-        FROM visits
-        JOIN users ON visits.tg_id = users.tg_id
-        WHERE visits.timestamp LIKE ?
-        ORDER BY visits.timestamp DESC
-    ''', (f'{today}%',))
+        SELECT u.full_name, v.status, v.timestamp
+        FROM visits v
+        INNER JOIN users u ON v.tg_id = u.tg_id
+        WHERE v.timestamp LIKE ?
+        AND v.id IN (
+            SELECT MAX(id) FROM visits WHERE timestamp LIKE ? GROUP BY tg_id
+        )
+        ORDER BY v.timestamp DESC
+    ''', (f'{today}%', f'{today}%'))
     
     rows = cursor.fetchall()
     conn.close()
@@ -180,8 +183,8 @@ def get_all_today_visits():
     if not rows:
         return "Сьогодні ще ніхто не відмічався."
     
-    # Форматуємо список у зручний текст
     report = ""
     for name, status, time in rows:
+        # Виводимо: Прізвище: Статус (Час)
         report += f"📍 {name}: {status} ({time.split()[1]})\n"
     return report
