@@ -1,18 +1,15 @@
-import sqlite3
+import asyncpg
 from datetime import datetime
+from config import DATABASE_URL
 
-# Назва файлу бази даних
-DB_NAME = 'visits.db'
-
-def init_db():
-    """Ініціалізація бази даних: створення таблиць, якщо вони не існують."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+async def init_db():
+    """Ініціалізація таблиць у Neon.tech."""
+    conn = await asyncpg.connect(DATABASE_URL)
     
-    # Таблиця користувачів (id, ПІБ, пошта, роль)
-    cursor.execute('''
+    # Таблиця користувачів
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            tg_id INTEGER PRIMARY KEY,
+            tg_id BIGINT PRIMARY KEY,
             full_name TEXT,
             email TEXT,
             role TEXT,
@@ -20,8 +17,8 @@ def init_db():
         )
     ''')
 
-    # Таблиця дозволених пошт з колонкою full_name
-    cursor.execute('''
+    # Таблиця дозволених пошт
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS allowed_emails (
             email TEXT PRIMARY KEY,
             class_name TEXT,
@@ -30,161 +27,98 @@ def init_db():
     ''')
     
     # Таблиця візитів
-    cursor.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS visits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tg_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            tg_id BIGINT REFERENCES users(tg_id),
             status TEXT,
-            timestamp TEXT,
-            FOREIGN KEY (tg_id) REFERENCES users (tg_id)
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    conn.commit()
-    conn.close()
+    await conn.close()
 
-def register_user(tg_id, full_name, email, role, class_name=None):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO users (tg_id, full_name, email, role, class_name)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (tg_id, full_name, email, role, class_name))
-    conn.commit()
-    conn.close()
+async def register_user(tg_id, full_name, email, role, class_name=None):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute('''
+        INSERT INTO users (tg_id, full_name, email, role, class_name)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (tg_id) DO UPDATE 
+        SET full_name = $2, email = $3, role = $4, class_name = $5
+    ''', tg_id, full_name, email, role, class_name)
+    await conn.close()
 
-def is_email_in_class(email, class_name):
-    """Перевірка, чи належить пошта цьому класу."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM allowed_emails WHERE email = ? AND class_name = ?', (email.lower(), class_name))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
+async def get_user_role(tg_id):
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow('SELECT role FROM users WHERE tg_id = $1', tg_id)
+    await conn.close()
+    return row['role'] if row else None
 
-def get_user_role(tg_id):
-    """Отримання ролі користувача за його Telegram ID."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT role FROM users WHERE tg_id = ?', (tg_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
-
-def log_visit(tg_id, status):
-    """Запис статусу відвідування (Прибув, В дорозі тощо) з часовою міткою."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('''
+async def log_visit(tg_id, status):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute('''
         INSERT INTO visits (tg_id, status, timestamp)
-        VALUES (?, ?, ?)
-    ''', (tg_id, status, now))
-    conn.commit()
-    conn.close()
+        VALUES ($1, $2, CURRENT_TIMESTAMP)
+    ''', tg_id, status)
+    await conn.close()
 
-def get_allowed_email_data(email):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT class_name, full_name FROM allowed_emails WHERE email = ?', (email.lower(),))
-    result = cursor.fetchone()
-    conn.close()
-    return result # Поверне (class_name, full_name) або None
+async def get_allowed_user_data(email):
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow('SELECT full_name, class_name FROM allowed_emails WHERE email = $1', email.lower())
+    await conn.close()
+    return (row['full_name'], row['class_name']) if row else None
 
-def get_absent_students(class_name):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Використовуємо DISTINCT, щоб уникнути повторень прізвищ
-    cursor.execute('''
+async def get_absent_students(class_name):
+    conn = await asyncpg.connect(DATABASE_URL)
+    # Пошук тих, хто не робив записів сьогодні
+    rows = await conn.fetch('''
         SELECT DISTINCT full_name FROM allowed_emails 
-        WHERE class_name = ? AND email NOT IN (
-            SELECT users.email FROM visits 
-            JOIN users ON visits.tg_id = users.tg_id 
-            WHERE visits.timestamp LIKE ?
+        WHERE class_name = $1 AND email NOT IN (
+            SELECT u.email FROM visits v
+            JOIN users u ON v.tg_id = u.tg_id 
+            WHERE v.timestamp::date = CURRENT_DATE
         )
-    ''', (class_name, f'{today}%'))
-    
-    absent = cursor.fetchall()
-    conn.close()
-    
-    # Якщо список порожній, повертаємо порожній список
-    if not absent:
+    ''', class_name)
+    await conn.close()
+
+    if not rows:
         return []
 
-    # Формуємо список із вашим оформленням
     formatted_list = []
-    separator = "------------------------"
-    
-    for row in absent:
-        formatted_list.append(separator)
-        formatted_list.append(f"{row[0]}❌")
-    
+    for row in rows:
+        formatted_list.append("------------------------")
+        formatted_list.append(f"{row['full_name']}❌")
     return formatted_list
 
-def get_all_students():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    # Вибираємо тільки тих, хто зареєстрований як учень
-    cursor.execute('SELECT tg_id FROM users WHERE role = "student"')
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def get_all_student_ids():
-    """Повертає список Telegram ID всіх користувачів з роллю student."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT tg_id FROM users WHERE role = "student"')
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def get_allowed_user_data(email):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT full_name, class_name FROM allowed_emails WHERE email = ?', (email.lower(),))
-    result = cursor.fetchone()
-    conn.close()
-    return result
-
-def clear_old_visits():
-    """Видаляє всі записи про візити за попередні дні, залишаючи лише сьогоднішні."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
-    # Видалити все, що не починається з сьогоднішньої дати
-    cursor.execute("DELETE FROM visits WHERE timestamp NOT LIKE ?", (f'{today}%',))
-    conn.commit()
-    conn.close()
-
-def get_all_today_visits():
-    """Отримання списку ОСТАННІХ статусів для кожного учня окремо."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Цей запит гарантує, що ми беремо ПІБ саме того учня, який робив відмітку
-    cursor.execute('''
+async def get_all_today_visits():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch('''
         SELECT u.full_name, v.status, v.timestamp
         FROM visits v
         INNER JOIN users u ON v.tg_id = u.tg_id
-        WHERE v.timestamp LIKE ?
+        WHERE v.timestamp::date = CURRENT_DATE
         AND v.id IN (
-            SELECT MAX(id) FROM visits WHERE timestamp LIKE ? GROUP BY tg_id
+            SELECT MAX(id) FROM visits WHERE timestamp::date = CURRENT_DATE GROUP BY tg_id
         )
         ORDER BY v.timestamp DESC
-    ''', (f'{today}%', f'{today}%'))
-    
-    rows = cursor.fetchall()
-    conn.close()
+    ''')
+    await conn.close()
     
     if not rows:
         return "Сьогодні ще ніхто не відмічався."
     
     report = ""
-    for name, status, time in rows:
-        # Виводимо: Прізвище: Статус (Час)
-        report += f"📍 {name}: {status} ({time.split()[1]})\n"
+    for r in rows:
+        time_str = r['timestamp'].strftime("%H:%M")
+        report += f"📍 {r['full_name']}: {r['status']} ({time_str})\n"
     return report
+
+async def get_all_student_ids():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch('SELECT tg_id FROM users WHERE role = $1', 'student')
+    await conn.close()
+    return [r['tg_id'] for r in rows]
+
+async def clear_old_visits():
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("DELETE FROM visits WHERE timestamp::date < CURRENT_DATE")
+    await conn.close()
