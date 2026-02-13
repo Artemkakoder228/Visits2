@@ -1,12 +1,18 @@
 import asyncpg
 from datetime import datetime
 from config import DATABASE_URL
+from aiogram.fsm.state import State, StatesGroup # Додано імпорт
+
+class AuthState(StatesGroup):
+    wait_for_class = State()
+    wait_for_email = State()
+    wait_for_teacher_code = State()
+    wait_for_teacher_email = State()
+    wait_for_name = State()
+    wait_for_absent_class = State()
 
 async def init_db():
-    """Ініціалізація таблиць у Neon.tech."""
     conn = await asyncpg.connect(DATABASE_URL)
-    
-    # Таблиця користувачів
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
             tg_id BIGINT PRIMARY KEY,
@@ -16,8 +22,6 @@ async def init_db():
             class_name TEXT
         )
     ''')
-
-    # Таблиця дозволених пошт
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS allowed_emails (
             email TEXT PRIMARY KEY,
@@ -25,8 +29,6 @@ async def init_db():
             full_name TEXT
         )
     ''')
-    
-    # Таблиця візитів
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS visits (
             id SERIAL PRIMARY KEY,
@@ -55,10 +57,7 @@ async def get_user_role(tg_id):
 
 async def log_visit(tg_id, status):
     conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute('''
-        INSERT INTO visits (tg_id, status, timestamp)
-        VALUES ($1, $2, CURRENT_TIMESTAMP)
-    ''', tg_id, status)
+    await conn.execute('INSERT INTO visits (tg_id, status) VALUES ($1, $2)', tg_id, status)
     await conn.close()
 
 async def get_allowed_user_data(email):
@@ -69,7 +68,6 @@ async def get_allowed_user_data(email):
 
 async def get_absent_students(class_name):
     conn = await asyncpg.connect(DATABASE_URL)
-    # Пошук тих, хто не робив записів сьогодні
     rows = await conn.fetch('''
         SELECT DISTINCT full_name FROM allowed_emails 
         WHERE class_name = $1 AND email NOT IN (
@@ -79,15 +77,7 @@ async def get_absent_students(class_name):
         )
     ''', class_name)
     await conn.close()
-
-    if not rows:
-        return []
-
-    formatted_list = []
-    for row in rows:
-        formatted_list.append("------------------------")
-        formatted_list.append(f"{row['full_name']}❌")
-    return formatted_list
+    return [f"------------------------\n{r['full_name']}❌" for r in rows]
 
 async def get_all_today_visits():
     conn = await asyncpg.connect(DATABASE_URL)
@@ -96,21 +86,12 @@ async def get_all_today_visits():
         FROM visits v
         INNER JOIN users u ON v.tg_id = u.tg_id
         WHERE v.timestamp::date = CURRENT_DATE
-        AND v.id IN (
-            SELECT MAX(id) FROM visits WHERE timestamp::date = CURRENT_DATE GROUP BY tg_id
-        )
+        AND v.id IN (SELECT MAX(id) FROM visits WHERE timestamp::date = CURRENT_DATE GROUP BY tg_id)
         ORDER BY v.timestamp DESC
     ''')
     await conn.close()
-    
-    if not rows:
-        return "Сьогодні ще ніхто не відмічався."
-    
-    report = ""
-    for r in rows:
-        time_str = r['timestamp'].strftime("%H:%M")
-        report += f"📍 {r['full_name']}: {r['status']} ({time_str})\n"
-    return report
+    if not rows: return "Сьогодні ще ніхто не відмічався."
+    return "\n".join([f"📍 {r['full_name']}: {r['status']} ({r['timestamp'].strftime('%H:%M')})" for r in rows])
 
 async def get_all_student_ids():
     conn = await asyncpg.connect(DATABASE_URL)
