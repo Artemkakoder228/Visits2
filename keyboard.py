@@ -43,8 +43,13 @@ def class_selection_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="10-А")],
-            [KeyboardButton(text="⬅️ Назад")] # Текст має збігатися з F.text
+            [KeyboardButton(text="⬅️ Назад")] # Кнопка для повернення
         ],
         resize_keyboard=True
     )
 
+def back_button():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+        resize_keyboard=True
+    )
