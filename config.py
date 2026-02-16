@@ -1,4 +1,4 @@
-BOT_TOKEN = "8560133843:AAGn7lubtuFOqvJDLyPfo6B6GdqHF74-T2k"
+BOT_TOKEN = "8560133843:AAFfG5Hxb4iSfrnRannhenYHOzUsG_jKfvY"
 TEACHER_SECRET_CODE = "12345678"
 ALLOWED_TEACHER_EMAIL = "ostapenco.tania@gmail.com"
 # ЗАМІНІТЬ ЦЕ НА ВАШ РЯДОК З NEON.TECH
